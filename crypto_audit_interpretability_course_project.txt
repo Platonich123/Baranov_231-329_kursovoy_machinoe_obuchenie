@@ -1,0 +1,807 @@
+# %%
+# Устанавливаем необходимые библиотеки для курсового проекта.
+# kaggle — нужен для скачивания датасета с Kaggle.
+# shap — нужен для интерпретации модели и объяснения предсказаний.
+# xgboost и lightgbm — дополнительные библиотеки градиентного бустинга, оставлены для возможного расширения работы.
+!pip install kaggle shap xgboost lightgbm -q
+
+
+# %%
+# Импортируем модуль files из Google Colab.
+# Он позволяет загрузить локальный файл с компьютера прямо в среду Colab.
+from google.colab import files
+
+# Загружаем файл kaggle.json.
+# В этом файле находится токен доступа к Kaggle API.
+# Содержимое файла нельзя публиковать, потому что это личный ключ аккаунта Kaggle.
+files.upload()
+
+
+# %%
+# os нужен для работы с папками, путями и правами доступа.
+# shutil нужен для копирования файла kaggle.json в нужную системную папку.
+import os
+import shutil
+
+# Создаем папку, в которой Kaggle API ищет файл авторизации.
+# exist_ok=True означает, что ошибки не будет, если папка уже существует.
+os.makedirs('/root/.kaggle', exist_ok=True)
+
+# Копируем загруженный kaggle.json в папку /root/.kaggle.
+shutil.copy('kaggle.json', '/root/.kaggle/kaggle.json')
+
+# Устанавливаем права доступа 600, чтобы файл был доступен только владельцу.
+# Без этого Kaggle может выдать предупреждение или ошибку безопасности.
+os.chmod('/root/.kaggle/kaggle.json', 600)
+
+# Выводим сообщение, чтобы убедиться, что настройка прошла успешно.
+print("Kaggle API настроен успешно")
+
+
+# %%
+# Создаем папку /content/data, куда будет скачан датасет.
+os.makedirs('/content/data', exist_ok=True)
+
+# Скачиваем датасет Ethereum Fraud Detection с Kaggle.
+# Ключ -d указывает идентификатор датасета, а -p — папку для сохранения.
+!kaggle datasets download -d vagifa/ethereum-frauddetection-dataset -p /content/data
+
+# Распаковываем скачанный zip-архив в папку /content/data.
+# Ключ -o разрешает перезаписать файлы, если они уже были распакованы ранее.
+!unzip -o /content/data/ethereum-frauddetection-dataset.zip -d /content/data
+
+# Показываем список файлов в папке, чтобы проверить, что CSV-файл появился.
+!ls -lah /content/data
+
+
+# %%
+# Импортируем pandas — основную библиотеку для работы с табличными данными.
+import pandas as pd
+
+# Загружаем CSV-файл с датасетом в DataFrame df.
+df = pd.read_csv('/content/data/transaction_dataset.csv')
+
+# Выводим размер датасета: количество строк и количество столбцов.
+print("Размер датасета:", df.shape)
+
+# Показываем первые 5 строк, чтобы визуально проверить структуру данных.
+df.head()
+
+
+# %%
+# df.info() показывает общую информацию о датасете:
+# количество строк, названия столбцов, количество непустых значений и типы данных.
+# Это помогает понять, какие признаки числовые, какие текстовые, и где могут быть пропуски.
+df.info()
+
+
+# %%
+# Выводим список всех столбцов датасета.
+# Это нужно, чтобы понять, какие признаки есть в данных и какие из них потом использовать для модели.
+df.columns
+
+
+# %%
+# Считаем количество пропущенных значений в каждом столбце.
+# isnull() находит пропуски, sum() считает их количество, sort_values() сортирует по убыванию.
+missing_values = df.isnull().sum().sort_values(ascending=False)
+
+# Выводим только те столбцы, где количество пропусков больше нуля.
+# Так удобнее увидеть проблемные признаки.
+missing_values[missing_values > 0]
+
+
+# %%
+# Смотрим распределение целевого признака FLAG.
+# FLAG = 0 означает нормальный объект, FLAG = 1 означает мошеннический/подозрительный объект.
+df['FLAG'].value_counts()
+
+
+# %%
+# Импортируем matplotlib для построения графиков.
+import matplotlib.pyplot as plt
+
+# Строим столбчатую диаграмму распределения классов целевого признака FLAG.
+df['FLAG'].value_counts().plot(kind='bar')
+
+# Добавляем заголовок и подписи осей, чтобы график был понятен в отчете.
+plt.title('Распределение классов FLAG')
+plt.xlabel('Класс')
+plt.ylabel('Количество объектов')
+plt.xticks(rotation=0)
+
+# Показываем график.
+plt.show()
+
+
+# %%
+# Повторно проверяем пропуски перед очисткой данных.
+# Этот блок фиксирует, какие признаки требуют обработки перед обучением модели.
+missing_values = df.isnull().sum().sort_values(ascending=False)
+
+# Отображаем только столбцы с пропущенными значениями.
+missing_values[missing_values > 0]
+
+
+# %%
+# Создаем копию исходного датасета, чтобы не изменять df напрямую.
+# Все дальнейшие преобразования будут выполняться в df_clean.
+df_clean = df.copy()
+
+# Убираем случайные пробелы в названиях столбцов.
+# Это снижает риск ошибок при обращении к признакам по имени.
+df_clean.columns = df_clean.columns.str.strip()
+
+# Перечисляем столбцы, которые не будем использовать в базовой модели:
+# Unnamed: 0 и Index — технические индексы;
+# Address — адрес кошелька, он является идентификатором, а не полезным числовым признаком;
+# token type — текстовые признаки, которые на данном этапе исключаются для стабильного обучения.
+columns_to_drop = [
+    'Unnamed: 0',
+    'Index',
+    'Address',
+    'ERC20 most sent token type',
+    'ERC20_most_rec_token_type'
+]
+
+# Удаляем лишние столбцы.
+# errors='ignore' нужен, чтобы код не падал, если какого-то столбца нет или он называется иначе.
+df_clean = df_clean.drop(columns=columns_to_drop, errors='ignore')
+
+# Проверяем новый размер датасета после удаления лишних признаков.
+print("Размер датасета после удаления лишних столбцов:", df_clean.shape)
+
+# Показываем первые строки очищенного датасета.
+df_clean.head()
+
+
+# %%
+# Проверяем, остались ли в датасете текстовые столбцы типа object.
+# Для большинства моделей sklearn признаки должны быть числовыми.
+df_clean.select_dtypes(include='object').columns
+
+
+# %%
+# Заполняем пропущенные значения медианой по каждому числовому столбцу.
+# Медиана выбрана потому, что она устойчивее к выбросам, чем среднее значение.
+df_clean = df_clean.fillna(df_clean.median(numeric_only=True))
+
+# Проверяем, остались ли пропуски после обработки.
+# Если результат равен 0, значит датасет готов к дальнейшему анализу и обучению.
+print("Количество пропусков после обработки:", df_clean.isnull().sum().sum())
+
+
+# %%
+# Получаем статистическое описание числовых признаков:
+# count — количество значений, mean — среднее, std — стандартное отклонение,
+# min/max — минимальное и максимальное значение, 25/50/75% — квартили.
+# .T транспонирует таблицу, чтобы признаки были строками и таблицу было удобнее читать.
+df_clean.describe().T
+
+
+# %%
+# Считаем количество объектов каждого класса целевой переменной FLAG.
+class_counts = df_clean['FLAG'].value_counts()
+
+# Считаем процентное соотношение классов.
+# Это важно, чтобы оценить баланс классов в задаче fraud detection.
+class_percent = df_clean['FLAG'].value_counts(normalize=True) * 100
+
+# Объединяем количество и процент в одну таблицу для отчета.
+class_distribution = pd.DataFrame({
+    'Количество': class_counts,
+    'Процент': class_percent.round(2)
+})
+
+# Показываем итоговую таблицу распределения классов.
+class_distribution
+
+
+# %%
+# Импортируем matplotlib для построения графика.
+import matplotlib.pyplot as plt
+
+# Строим столбчатый график по количеству объектов каждого класса.
+class_distribution['Количество'].plot(kind='bar')
+
+# Добавляем заголовок и подписи осей.
+plt.title('Распределение объектов по классам')
+plt.xlabel('Класс FLAG')
+plt.ylabel('Количество объектов')
+plt.xticks(rotation=0)
+
+# Показываем график.
+plt.show()
+
+
+# %%
+# Считаем корреляцию всех числовых признаков с целевым признаком FLAG.
+# Корреляция показывает линейную связь признака с классом fraud/non-fraud.
+correlation_with_target = df_clean.corr(numeric_only=True)['FLAG'].sort_values(ascending=False)
+
+# Выводим список признаков, отсортированный по корреляции с FLAG.
+correlation_with_target
+
+
+# %%
+# Берем 10 признаков с наибольшей абсолютной корреляцией с целевой переменной.
+# abs() нужен, потому что сильная отрицательная связь тоже может быть важной.
+top_corr = correlation_with_target.drop('FLAG').abs().sort_values(ascending=False).head(10)
+
+# Строим горизонтальную диаграмму топ-10 коррелирующих признаков.
+top_corr.plot(kind='barh')
+
+# Добавляем оформление графика.
+plt.title('Топ-10 признаков по корреляции с FLAG')
+plt.xlabel('Абсолютное значение корреляции')
+plt.ylabel('Признак')
+plt.gca().invert_yaxis()
+plt.show()
+
+
+# %%
+# Импортируем matplotlib для построения корреляционной матрицы.
+import matplotlib.pyplot as plt
+
+# Выбираем признаки из топа корреляций и добавляем целевой признак FLAG.
+top_features = top_corr.index.tolist() + ['FLAG']
+
+# Строим корреляционную матрицу для выбранных признаков.
+# Она показывает взаимосвязи между признаками и помогает увидеть похожие/связанные признаки.
+corr_matrix = df_clean[top_features].corr(numeric_only=True)
+
+# Создаем изображение корреляционной матрицы.
+plt.figure(figsize=(12, 8))
+plt.imshow(corr_matrix, aspect='auto')
+plt.colorbar()
+plt.xticks(range(len(corr_matrix.columns)), corr_matrix.columns, rotation=90)
+plt.yticks(range(len(corr_matrix.columns)), corr_matrix.columns)
+plt.title('Корреляционная матрица наиболее значимых признаков')
+plt.tight_layout()
+plt.show()
+
+
+# %%
+# Ищем все столбцы, в названии которых есть слово transactions.
+# Это нужно, потому что в датасете один столбец имеет нестандартное название без закрывающей скобки.
+[col for col in df_clean.columns if 'transaction' in col.lower()]
+
+
+# %%
+# Формируем список ключевых признаков, по которым построим гистограммы распределения.
+# Гистограммы позволяют увидеть, как распределены значения признаков и есть ли сильная асимметрия.
+features_to_plot = [
+    'Time Diff between first and last (Mins)',
+    'Avg min between received tnx',
+    'total transactions (including tnx to create contract',
+    'Received Tnx',
+    'Sent tnx'
+]
+
+# Для каждого выбранного признака строим отдельную гистограмму.
+for feature in features_to_plot:
+    plt.figure(figsize=(8, 4))
+    df_clean[feature].hist(bins=50)
+    plt.title(f'Распределение признака: {feature}')
+    plt.xlabel(feature)
+    plt.ylabel('Количество объектов')
+    plt.show()
+
+
+# %%
+# Строим boxplot-графики для выбранных признаков.
+# Boxplot помогает увидеть медиану, разброс значений и выбросы.
+# В криптовалютных данных выбросы ожидаемы, потому что отдельные адреса могут иметь очень высокую активность.
+for feature in features_to_plot:
+    plt.figure(figsize=(8, 4))
+    plt.boxplot(df_clean[feature], vert=False)
+    plt.title(f'Boxplot признака: {feature}')
+    plt.xlabel(feature)
+    plt.show()
+
+
+# %%
+# Проверяем список признаков, которые использовались для гистограмм и boxplot.
+# Этот список пригодится для описания этапа анализа данных в отчете.
+features_to_plot
+
+
+# %%
+# Разделяем данные на признаки X и целевую переменную y.
+# X содержит все входные признаки, по которым модель будет делать прогноз.
+# y содержит правильные ответы — класс FLAG.
+X = df_clean.drop('FLAG', axis=1)
+y = df_clean['FLAG']
+
+# Проверяем размеры X и y.
+print("Размер X:", X.shape)
+print("Размер y:", y.shape)
+
+
+# %%
+# Импортируем функцию для разделения данных на обучающую и тестовую выборки.
+from sklearn.model_selection import train_test_split
+
+# Делим датасет на train и test.
+# test_size=0.2 означает, что 20% данных оставляем для тестирования.
+# random_state=42 фиксирует случайность, чтобы результат можно было повторить.
+# stratify=y сохраняет одинаковое соотношение классов fraud/non-fraud в train и test.
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42,
+    stratify=y
+)
+
+# Выводим размеры обучающей и тестовой выборок.
+print("Размер обучающей выборки:", X_train.shape)
+print("Размер тестовой выборки:", X_test.shape)
+
+# Проверяем распределение классов в обучающей выборке.
+print("
+Распределение классов в обучающей выборке:")
+print(y_train.value_counts(normalize=True).round(3))
+
+# Проверяем распределение классов в тестовой выборке.
+print("
+Распределение классов в тестовой выборке:")
+print(y_test.value_counts(normalize=True).round(3))
+
+
+# %%
+# Импортируем StandardScaler для масштабирования признаков.
+# Масштабирование нужно для моделей, чувствительных к масштабу признаков: Logistic Regression и KNN.
+from sklearn.preprocessing import StandardScaler
+
+# Создаем объект scaler.
+scaler = StandardScaler()
+
+# fit_transform обучает scaler на обучающей выборке и сразу преобразует X_train.
+X_train_scaled = scaler.fit_transform(X_train)
+
+# transform применяет уже обученный scaler к тестовой выборке.
+# Важно: на тесте fit делать нельзя, чтобы не было утечки данных.
+X_test_scaled = scaler.transform(X_test)
+
+print("Масштабирование выполнено")
+
+
+# %%
+# Импортируем алгоритмы машинного обучения для классификации.
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neighbors import KNeighborsClassifier
+
+# Импортируем метрики качества модели.
+# Accuracy — общая доля правильных ответов.
+# Precision — точность определения fraud среди всех объектов, предсказанных как fraud.
+# Recall — полнота, то есть доля найденных fraud-объектов.
+# F1-score — баланс между Precision и Recall.
+# ROC-AUC — способность модели разделять два класса на разных порогах.
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+
+# Создаем словарь моделей, которые будем сравнивать.
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, random_state=42),
+    "Decision Tree": DecisionTreeClassifier(random_state=42),
+    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+    "KNN": KNeighborsClassifier(n_neighbors=5)
+}
+
+# Создаем пустой список, куда будем сохранять результаты каждой модели.
+results = []
+
+# Последовательно обучаем каждую модель и считаем метрики.
+for name, model in models.items():
+    # Logistic Regression и KNN чувствительны к масштабу признаков,
+    # поэтому для них используем X_train_scaled и X_test_scaled.
+    if name in ["Logistic Regression", "KNN"]:
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_test_scaled)
+
+        # Если модель умеет выдавать вероятности, берем вероятность класса 1 для ROC-AUC.
+        if hasattr(model, "predict_proba"):
+            y_proba = model.predict_proba(X_test_scaled)[:, 1]
+        else:
+            y_proba = y_pred
+    else:
+        # Деревья и бустинг не требуют обязательного масштабирования,
+        # поэтому обучаем их на исходных числовых признаках.
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+
+        if hasattr(model, "predict_proba"):
+            y_proba = model.predict_proba(X_test)[:, 1]
+        else:
+            y_proba = y_pred
+
+    # Сохраняем метрики текущей модели в список results.
+    results.append({
+        "Модель": name,
+        "Accuracy": accuracy_score(y_test, y_pred),
+        "Precision": precision_score(y_test, y_pred),
+        "Recall": recall_score(y_test, y_pred),
+        "F1-score": f1_score(y_test, y_pred),
+        "ROC-AUC": roc_auc_score(y_test, y_proba)
+    })
+
+# Превращаем список результатов в таблицу DataFrame.
+results_df = pd.DataFrame(results)
+
+# Выводим таблицу сравнения моделей.
+results_df
+
+
+# %%
+# Сортируем таблицу моделей по F1-score по убыванию.
+# F1-score важен для fraud detection, потому что учитывает и точность, и полноту.
+results_df.sort_values(by="F1-score", ascending=False)
+
+
+# %%
+# Строим столбчатый график сравнения моделей по основным метрикам.
+# Это позволяет наглядно увидеть, какая модель показала лучший результат.
+results_df.set_index("Модель")[["Accuracy", "Precision", "Recall", "F1-score", "ROC-AUC"]].plot(
+    kind="bar",
+    figsize=(12, 6)
+)
+
+# Оформляем график для отчета.
+plt.title("Сравнение качества моделей машинного обучения")
+plt.ylabel("Значение метрики")
+plt.xticks(rotation=45)
+plt.ylim(0, 1)
+plt.legend(loc="lower right")
+plt.show()
+
+
+# %%
+# Еще раз выводим отсортированную таблицу, чтобы зафиксировать лучшую модель.
+# По результатам сравнения лучшей моделью является Gradient Boosting.
+results_df.sort_values(by="F1-score", ascending=False)
+
+
+# %%
+# Импортируем инструменты для подробной оценки модели:
+# confusion_matrix — матрица ошибок;
+# ConfusionMatrixDisplay — визуализация матрицы ошибок;
+# classification_report — отчет с Precision, Recall и F1-score по каждому классу.
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
+
+# Создаем лучшую базовую модель Gradient Boosting.
+best_model = GradientBoostingClassifier(random_state=42)
+
+# Обучаем модель на обучающей выборке.
+best_model.fit(X_train, y_train)
+
+# Получаем предсказанные классы на тестовой выборке.
+y_pred_best = best_model.predict(X_test)
+
+# Получаем вероятности класса 1 для расчета ROC-AUC и ROC-кривой.
+y_proba_best = best_model.predict_proba(X_test)[:, 1]
+
+# Считаем матрицу ошибок.
+cm = confusion_matrix(y_test, y_pred_best)
+
+# Визуализируем матрицу ошибок.
+disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+disp.plot()
+
+plt.title("Матрица ошибок для Gradient Boosting")
+plt.show()
+
+# Выводим подробный отчет классификации по классам 0 и 1.
+print(classification_report(y_test, y_pred_best))
+
+
+# %%
+# Импортируем инструмент для построения ROC-кривой.
+from sklearn.metrics import RocCurveDisplay
+
+# Строим ROC-кривую для лучшей модели Gradient Boosting.
+# ROC-кривая показывает зависимость True Positive Rate от False Positive Rate.
+RocCurveDisplay.from_estimator(best_model, X_test, y_test)
+
+plt.title("ROC-кривая для Gradient Boosting")
+plt.show()
+
+
+# %%
+# Импортируем GridSearchCV для подбора гиперпараметров модели.
+from sklearn.model_selection import GridSearchCV
+
+# Задаем сетку гиперпараметров для Gradient Boosting.
+# n_estimators — количество деревьев;
+# learning_rate — скорость обучения;
+# max_depth — максимальная глубина дерева;
+# min_samples_split — минимальное число объектов для разбиения узла.
+param_grid = {
+    'n_estimators': [50, 100, 150],
+    'learning_rate': [0.05, 0.1, 0.2],
+    'max_depth': [2, 3, 4],
+    'min_samples_split': [2, 5]
+}
+
+# Создаем GridSearchCV.
+# scoring='f1' означает, что лучшая модель выбирается по F1-score.
+# cv=3 — используется трехкратная кросс-валидация.
+# n_jobs=-1 — задействуются все доступные ядра процессора.
+grid_search = GridSearchCV(
+    estimator=GradientBoostingClassifier(random_state=42),
+    param_grid=param_grid,
+    scoring='f1',
+    cv=3,
+    n_jobs=-1,
+    verbose=1
+)
+
+# Запускаем перебор параметров и обучение моделей на обучающей выборке.
+grid_search.fit(X_train, y_train)
+
+# Выводим лучшие найденные параметры.
+print("Лучшие параметры:")
+print(grid_search.best_params_)
+
+# Выводим лучший F1-score на кросс-валидации.
+print("
+Лучший F1-score на кросс-валидации:")
+print(grid_search.best_score_)
+
+
+# %%
+# Извлекаем лучшую модель, найденную GridSearchCV.
+best_grid_model = grid_search.best_estimator_
+
+# Делаем предсказания классов на тестовой выборке.
+y_pred_grid = best_grid_model.predict(X_test)
+
+# Получаем вероятности класса 1 для ROC-AUC.
+y_proba_grid = best_grid_model.predict_proba(X_test)[:, 1]
+
+# Выводим метрики качества после подбора гиперпараметров.
+print("Метрики модели после GridSearch:")
+print("Accuracy:", accuracy_score(y_test, y_pred_grid))
+print("Precision:", precision_score(y_test, y_pred_grid))
+print("Recall:", recall_score(y_test, y_pred_grid))
+print("F1-score:", f1_score(y_test, y_pred_grid))
+print("ROC-AUC:", roc_auc_score(y_test, y_proba_grid))
+
+# Выводим подробный classification report для оптимизированной модели.
+print("
+Classification Report:")
+print(classification_report(y_test, y_pred_grid))
+
+
+# %%
+# Считаем матрицу ошибок для модели после GridSearch.
+cm_grid = confusion_matrix(y_test, y_pred_grid)
+
+# Визуализируем матрицу ошибок.
+disp = ConfusionMatrixDisplay(confusion_matrix=cm_grid)
+disp.plot()
+
+plt.title("Матрица ошибок Gradient Boosting после GridSearch")
+plt.show()
+
+
+# %%
+# Импортируем pandas и matplotlib на случай, если ячейка запускается отдельно.
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Создаем таблицу важности признаков для оптимизированной модели Gradient Boosting.
+# feature_importances_ показывает, насколько сильно каждый признак участвовал в построении модели.
+feature_importance = pd.DataFrame({
+    'Признак': X_train.columns,
+    'Важность': best_grid_model.feature_importances_
+}).sort_values(by='Важность', ascending=False)
+
+# Выводим 15 самых важных признаков.
+feature_importance.head(15)
+
+
+# %%
+# Берем топ-15 признаков по важности.
+top_features_importance = feature_importance.head(15)
+
+# Строим горизонтальный график важности признаков.
+plt.figure(figsize=(10, 6))
+plt.barh(top_features_importance['Признак'], top_features_importance['Важность'])
+plt.gca().invert_yaxis()
+plt.title('Топ-15 признаков по важности для Gradient Boosting')
+plt.xlabel('Важность признака')
+plt.ylabel('Признак')
+plt.show()
+
+
+# %%
+# Импортируем библиотеку SHAP.
+# SHAP используется для интерпретации модели: он показывает вклад каждого признака в предсказание.
+import shap
+
+# Инициализируем JavaScript-визуализации SHAP для Colab/Jupyter.
+shap.initjs()
+
+
+# %%
+# Для ускорения расчета SHAP берем не весь тестовый набор, а случайные 500 объектов.
+X_test_sample = X_test.sample(n=500, random_state=42)
+
+# Создаем SHAP-объяснитель для древовидной модели Gradient Boosting.
+explainer = shap.TreeExplainer(best_grid_model)
+
+# Рассчитываем SHAP-значения для выбранной части тестовой выборки.
+# Эти значения показывают, как каждый признак влияет на предсказание модели.
+shap_values = explainer.shap_values(X_test_sample)
+
+print("SHAP-значения рассчитаны")
+
+
+# %%
+# Строим SHAP summary plot.
+# Он показывает, какие признаки сильнее всего влияют на модель,
+# а также как высокие и низкие значения признаков двигают прогноз к классу fraud или non-fraud.
+shap.summary_plot(shap_values, X_test_sample)
+
+
+# %%
+# Строим SHAP bar plot.
+# Этот график показывает среднюю абсолютную важность признаков по SHAP.
+# Он удобен для краткого объяснения, какие признаки самые значимые.
+shap.summary_plot(shap_values, X_test_sample, plot_type="bar")
+
+
+# %%
+# Находим индексы объектов из тестовой выборки, которые действительно относятся к классу fraud.
+fraud_indices = y_test[y_test == 1].index
+
+# Берем первый мошеннический объект для локальной интерпретации.
+fraud_index = fraud_indices[0]
+
+# Выводим индекс объекта, истинный класс, предсказанный класс и вероятность fraud.
+# Это нужно, чтобы показать объяснение решения модели на конкретном примере.
+print("Индекс выбранного мошеннического объекта:", fraud_index)
+print("Истинный класс:", y_test.loc[fraud_index])
+print("Предсказанный класс:", best_grid_model.predict(X_test.loc[[fraud_index]])[0])
+print("Вероятность fraud:", best_grid_model.predict_proba(X_test.loc[[fraud_index]])[0][1])
+
+
+# %%
+# Выбираем один конкретный объект из тестовой выборки для объяснения.
+single_object = X_test.loc[[fraud_index]]
+
+# Создаем SHAP-объяснитель для оптимизированной модели.
+explainer = shap.TreeExplainer(best_grid_model)
+
+# Рассчитываем SHAP-значения для одного объекта.
+single_shap_values = explainer(single_object)
+
+# Строим waterfall plot.
+# Он показывает, какие признаки повышают или понижают вероятность отнесения объекта к fraud.
+shap.plots.waterfall(single_shap_values[0])
+
+
+# %%
+# Задаем список наиболее важных признаков, значения которых хотим посмотреть у выбранного fraud-объекта.
+important_features = [
+    'Total ERC20 tnxs',
+    'Time Diff between first and last (Mins)',
+    'Unique Received From Addresses',
+    'ERC20 total Ether received',
+    'ERC20 min val rec',
+    'total transactions (including tnx to create contract',
+    'total ether received',
+    'Avg min between received tnx',
+    'Received Tnx',
+    'Sent tnx'
+]
+
+# Выводим значения этих признаков для выбранного объекта.
+# .T транспонирует таблицу, чтобы признаки были строками и их было удобнее читать.
+X_test.loc[[fraud_index], important_features].T
+
+
+# %%
+# Создаем итоговую таблицу сравнения Gradient Boosting до и после GridSearch.
+# Это показывает, дала ли настройка гиперпараметров улучшение качества модели.
+final_comparison = pd.DataFrame({
+    'Модель': ['Gradient Boosting до GridSearch', 'Gradient Boosting после GridSearch'],
+    'Accuracy': [
+        accuracy_score(y_test, y_pred_best),
+        accuracy_score(y_test, y_pred_grid)
+    ],
+    'Precision': [
+        precision_score(y_test, y_pred_best),
+        precision_score(y_test, y_pred_grid)
+    ],
+    'Recall': [
+        recall_score(y_test, y_pred_best),
+        recall_score(y_test, y_pred_grid)
+    ],
+    'F1-score': [
+        f1_score(y_test, y_pred_best),
+        f1_score(y_test, y_pred_grid)
+    ],
+    'ROC-AUC': [
+        roc_auc_score(y_test, y_proba_best),
+        roc_auc_score(y_test, y_proba_grid)
+    ]
+})
+
+# Выводим итоговую таблицу.
+final_comparison
+
+
+# %%
+# Строим график сравнения Gradient Boosting до и после настройки гиперпараметров.
+final_comparison.set_index('Модель')[['Accuracy', 'Precision', 'Recall', 'F1-score', 'ROC-AUC']].plot(
+    kind='bar',
+    figsize=(10, 6)
+)
+
+# Оформляем график для отчета.
+plt.title('Сравнение Gradient Boosting до и после GridSearch')
+plt.ylabel('Значение метрики')
+plt.xticks(rotation=20)
+plt.ylim(0, 1)
+plt.legend(loc='lower right')
+plt.show()
+
+
+# %%
+# Итоговый комментарий:
+# На этом практическая часть завершена.
+# В работе были выполнены загрузка данных, очистка, анализ, обучение нескольких моделей,
+# подбор гиперпараметров лучшей модели и интерпретация результатов с помощью feature importance и SHAP.
+print("Практическая часть курсового проекта завершена")
+
+
+# %%
+# Импортируем алгоритм Isolation Forest для поиска аномалий без учителя.
+from sklearn.ensemble import IsolationForest
+from sklearn.metrics import confusion_matrix, classification_report
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# contamination задает ожидаемую долю аномалий.
+# В качестве ориентировочной доли используем долю fraud-объектов в датасете.
+contamination_rate = y.mean()
+
+isolation_model = IsolationForest(
+    n_estimators=100,
+    contamination=contamination_rate,
+    random_state=42
+)
+
+# Обучаем модель без использования FLAG.
+# Алгоритм анализирует только структуру признаков и пытается найти нетипичные объекты.
+isolation_pred = isolation_model.fit_predict(X)
+
+# В Isolation Forest результат -1 означает аномалию, 1 означает нормальный объект.
+# Преобразуем результат к виду 1 = аномалия, 0 = нормальный объект.
+anomaly_flag = (isolation_pred == -1).astype(int)
+
+# Сравниваем найденные аномалии с реальной меткой FLAG.
+anomaly_comparison = pd.crosstab(
+    y,
+    anomaly_flag,
+    rownames=['Реальный FLAG'],
+    colnames=['Аномалия по Isolation Forest']
+)
+
+anomaly_comparison
+
+# %%
+# Выводим отчет классификации, чтобы понять, насколько найденные аномалии совпадают с fraud-объектами.
+print(classification_report(y, anomaly_flag))
+
+# Строим график распределения найденных аномалий.
+pd.Series(anomaly_flag).value_counts().sort_index().plot(kind='bar')
+plt.title('Распределение объектов по результату Isolation Forest')
+plt.xlabel('0 — нормальный объект, 1 — аномалия')
+plt.ylabel('Количество объектов')
+plt.xticks(rotation=0)
+plt.show()
