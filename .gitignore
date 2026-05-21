@@ -1,0 +1,26 @@
+# Kaggle API key — нельзя загружать на GitHub
+kaggle.json
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Raw dataset
+data/transaction_dataset.csv
